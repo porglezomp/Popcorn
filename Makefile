@@ -1,5 +1,5 @@
 EXE = Popcorn
-OBJS = popcorn.o
+OBJS = popcorn.o rgbe.o
 FLAGS = $(shell sdl2-config --cflags)
 LIBS = $(shell sdl2-config --static-libs)
 
@@ -10,3 +10,5 @@ $(EXE) : $(OBJS)
 
 %.o : %.cpp
 	g++ $< -c $(FLAGS)
+%.o : %.c
+	gcc $< -c $(FLAGS)

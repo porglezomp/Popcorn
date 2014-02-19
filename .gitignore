@@ -21,3 +21,5 @@
 *.sublime-workspace
 
 Popcorn
+*.hdr
+.DS_Store
