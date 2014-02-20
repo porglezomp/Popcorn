@@ -10,15 +10,15 @@ extern "C" {
 // Constants
 const int width = 1280, height = 720;
 const double internwidth = 2, internheight = 1.125;
-double offsetx = 0, offsety = .57; double dty = -.0023;
-const double delta = 1, dt = .02;
-const int iterMax = 10, iterStep = (1<<19), frameIters = (1<<19);
+double offsetx = 0, offsety = .57; double dty = -.115;
+const double delta = 1, dt = .01;
+const int iterMax = 10, iterStep = (1<<18), frameIters = (1<<18);
 const double s0 = .5, s1 = 1, s2 = -.3, s3 = 2;
 double t0 = -2, t1 = 1, t2 = 3, t3 = -4;
 bool running = true;
-float intensifyScreen = 16, dampenFrame = 128;
+float intensifyScreen = 32, dampenFrame = 64;
 const int preRoll = 0;
-const int endFrame = 1024;
+const int endFrame = 2048;
 
 char *nameStub;
 SDL_Window *window;
@@ -51,6 +51,7 @@ int main(int argc, char **argv) {
 	SDL_CreateWindowAndRenderer(width, height, 0, &window, &renderer);
 	if (window == NULL) quit(1);
 	if (renderer == NULL) quit(1);
+	SDL_SetWindowTitle(window, "Starting render...");
 	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
 	
 	// Get name for frames
@@ -96,11 +97,13 @@ int main(int argc, char **argv) {
 			FILE *img = fopen(name, "wb");
 			RGBE_WriteHeader(img, width, height, NULL);
 			RGBE_WritePixels_RLE(img, (float *) frame, width, height);
+			fclose(img);
 		}
 		delta = SDL_GetTicks() - d;
-		printf("Total deltatime for frame %i is %.2f seconds, %.2f%% in calculation, %.2f%% in drawing, %.2f%% in frame output. Total elapsed time is %.2f seconds.\n",
-					frameNum, delta/1000.0, 100.0 * delta1/delta, 100.0 * delta2/delta, 100.0 - 100.0*delta3/delta, (SDL_GetTicks()-startTime)/1000.0);
-
+		char title[512];
+		sprintf(title, "Frame %i out of %i    Frame time: %.2f sec (%.1f%% rendering, %.1f%% display, %.1f%% saving frames)   Total time: %.2f sec    ", 
+					frameNum, endFrame, delta/1000.0, 100.0 * delta1/delta, 100.0 * delta2/delta, 100.0 - 100.0*delta3/delta, (SDL_GetTicks()-startTime)/1000.0);
+		SDL_SetWindowTitle(window, title);
 		clearData();
 		if (frameNum >= endFrame) running = false;
 	}
@@ -168,7 +171,7 @@ void updateCoefs() {
 	t1 += s1 * dt;
 	t2 += s2 * dt;
 	t3 += s3 * dt;
-	offsety += dty;
+	offsety += dty * dt;
 }
 
 void drawScreen() {
