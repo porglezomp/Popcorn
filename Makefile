@@ -1,6 +1,7 @@
 EXE = Popcorn
 OBJS = popcorn.o rgbe.o
-FLAGS = $(shell sdl2-config --cflags) -march=native -O2 -flto -g
+#SSE = -msse -DUSE_SSE2
+FLAGS = $(shell sdl2-config --cflags) -march=native -O3 -flto -g $(SSE)
 LIBS = $(shell sdl2-config --static-libs)
 
 all: $(EXE)
