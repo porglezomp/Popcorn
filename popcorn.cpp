@@ -3,20 +3,23 @@
 #include <math.h>
 #include <algorithm>
 #include <string.h>
+#include <future>
+#include <thread>
+#include <vector>
 extern "C" {
 	#include "rgbe.h"
 };
 
 // Constants
-const int width = 1280, height = 720;
-const double internwidth = 2, internheight = 1.125;
-double offsetx = 0, offsety = .57; double dty = -.115;
-const double delta = 1, dt = .01;
-const int iterMax = 10, iterStep = (1<<18), frameIters = (1<<18);
-const double s0 = .5, s1 = 1, s2 = -.3, s3 = 2;
-double t0 = -2, t1 = 1, t2 = 3, t3 = -4;
+const int width = 1920, height = width*.5625;
+const float internwidth = 2, internheight = 1.125;
+float offsetx = 0, offsety = .57; float dty = -.115;
+const float dt = .01;//, delta = 1;
+const int iterMax = 10, iterSteps = 1, frameIters = (1<<23);
+const float s0 = .5, s1 = 1, s2 = -.3, s3 = 2;
+float t0 = -2, t1 = 1, t2 = 3, t3 = -4;
 bool running = true;
-float intensifyScreen = 32, dampenFrame = 64;
+float intensifyScreen = 4, dampenFrame = 512;
 const int preRoll = 0;
 const int endFrame = 2048;
 
@@ -25,18 +28,19 @@ SDL_Window *window;
 SDL_Renderer *renderer;
 SDL_Texture *texture;
 Uint32 pixels[width*height];
-double buffer[width*height];
+std::vector<float*> buffers;
 float frame[width*height][3];
+std::vector< std::future<void> > threads;
 
 #define XY(i, j)	((i) + (j)*width)
 #define PI	3.141592654
 
 // Velocity field control functions for x and y respectively
-double f(double, double);
-double g(double, double);
+float f(float, float);
+float g(float, float);
 
-void popcornIterate();
-void insert(double, double);
+void popcornIterate(float*);
+void insert(float*, float, float);
 void preparePixels();
 void prepareFrame();
 void updateCoefs();
@@ -44,22 +48,30 @@ void drawScreen();
 void handleEvents();
 void clearData();
 void quit(int);
+void calc(int, float*);
 
 int main(int argc, char **argv) {
 	// Initialize SDL
 	if (SDL_Init(SDL_INIT_EVERYTHING) < 0) quit(1);
-	SDL_CreateWindowAndRenderer(width, height, 0, &window, &renderer);
+	SDL_SetHint("SDL_HINT_RENDER_SCALE_QUALITY", "1");
+	SDL_CreateWindowAndRenderer(std::min(width, 1280), std::min(height, 720), 0, &window, &renderer);
 	if (window == NULL) quit(1);
 	if (renderer == NULL) quit(1);
 	SDL_SetWindowTitle(window, "Starting render...");
 	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
-	
+
 	// Get name for frames
 	if (argc > 1) {
 		nameStub = argv[1];
 	} else {
 		puts("No frame saving.");
 	}
+
+	buffers.push_back(new float[width*height]);
+	for (int i = 1; i < std::min(std::thread::hardware_concurrency(), 64u); i++) {
+		buffers.push_back(new float[width*height]);
+	}
+	int threadCount = buffers.size();
 
 	long startTime = SDL_GetTicks();
 	// Pre-roll
@@ -73,11 +85,16 @@ int main(int argc, char **argv) {
 		long d = SDL_GetTicks();
 		for (int total = 0; total < frameIters;) {
 			long a = SDL_GetTicks();
-			for (int i = 0; i < iterStep; i++) {
-				popcornIterate();
-				handleEvents();
-				total++;
+			for (int i = 0; i < buffers.size(); i++) {
+				threads.push_back(std::async(std::launch::async, calc, frameIters/threadCount/iterSteps, buffers[i]));
+				total += frameIters/threadCount/iterSteps;
 			}
+			for (int i = 0; i < threads.size(); i++) {
+				threads[i].wait();
+			}
+			threads.clear();
+
+			handleEvents();
 			long b = SDL_GetTicks();
 			preparePixels();
 			drawScreen();
@@ -101,45 +118,54 @@ int main(int argc, char **argv) {
 		}
 		delta = SDL_GetTicks() - d;
 		char title[512];
-		sprintf(title, "Frame %i out of %i    Frame time: %.2f sec (%.1f%% rendering, %.1f%% display, %.1f%% saving frames)   Total time: %.2f sec    ", 
-					frameNum, endFrame, delta/1000.0, 100.0 * delta1/delta, 100.0 * delta2/delta, 100.0 - 100.0*delta3/delta, (SDL_GetTicks()-startTime)/1000.0);
+		sprintf(title, "Rendering on %i threads    Frame %i out of %i    Frame time: %.2f sec (%.1f%% rendering, %.1f%% display, %.1f%% saving frames)   Total time: %.2f sec    ", 
+					threadCount, frameNum, endFrame, delta/1000.0, 100.0 * delta1/delta, 100.0 * delta2/delta, 100.0 - 100.0*delta3/delta, (SDL_GetTicks()-startTime)/1000.0);
 		SDL_SetWindowTitle(window, title);
 		clearData();
-		if (frameNum >= endFrame) running = false;
+		if (frameNum >= endFrame) break;
+	}
+	SDL_SetWindowTitle(window, "Done");
+	while (running) {
+		handleEvents();
 	}
 	quit(0);
 }
 
 /******************************* USERS SHOULD EDIT HERE *******************************/
 
-double f(double x, double y) {
-	return cos(t0 + y + sin(t1 + PI * x));
+float f(float x, float y) {
+	return cosf(t0 + y + sinf(t1 + PI * x));
 }
-double g(double x, double y) {
-	return cos(t2 + y + cos(t3 + PI * x));
+float g(float x, float y) {
+	return cosf(t2 + y + cosf(t3 + PI * x));
 }
 
 /**************************************************************************************/
 
-void popcornIterate() {
-	double x = (rand()%1000000)/1000000.0; x *= 2; x -= 1; x *= internwidth;
-	double y = (rand()%1000000)/1000000.0; y *= 2; y -= 1; y *= internheight;
-	double dx, dy;
-	for (int i = 0; i < iterMax; i++) {
-		dx = f(x, y); dy = g(x, y);
-		x += delta * dx;
-		y += delta * dy;
-		insert(x, y);
+void calc(int samples, float *buffer) {
+	for (int total = 0; total < samples; total++) {
+		popcornIterate(buffer);
 	}
 }
 
-void insert(double x, double y) {
+void popcornIterate(float *buffer) {
+	float x = (rand()%1000000)/1000000.0; x *= 2; x -= 1; x *= internwidth;
+	float y = (rand()%1000000)/1000000.0; y *= 2; y -= 1; y *= internheight;
+	float dx, dy;
+	for (int i = 0; i < iterMax; i++) {
+		dx = f(x, y); dy = g(x, y);
+		x += dx; y += dy;
+		insert(buffer, x, y);
+	}
+}
+
+void insert(float *buffer, float x, float y) {
 	x += internwidth; x *= .5; x += offsetx; x /= internwidth; x *= width;
 	y += internheight; y *= .5; y += offsety; y /= internheight; y *= height;
 	int x1 = ceil(x), x0 = x1 - 1;
 	int y1 = ceil(y), y0 = y1 - 1;
-	double xfac = x - x0, yfac = y - y0;
-	double ixfac = 1-xfac, iyfac = 1-yfac;
+	float xfac = x - x0, yfac = y - y0;
+	float ixfac = 1-xfac, iyfac = 1-yfac;
 	if (y0 >= 0 && x0 >= 0 && y1 < height && x1 < width) {
 		buffer[XY(x0, y0)] += ixfac * iyfac;
 		buffer[XY(x1, y0)] += xfac * iyfac;
@@ -151,7 +177,11 @@ void insert(double x, double y) {
 void preparePixels() {
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
-			pixels[XY(x, y)] = std::min(sqrt(buffer[XY(x, y)])*intensifyScreen, 255.0);
+			float preval = 0;
+			for (int i = 0; i < buffers.size(); i++) {
+				preval += buffers[i][XY(x, y)];
+			}
+			pixels[XY(x, y)] = std::min(sqrt(preval)*intensifyScreen, 255.0);
 		}
 	}
 }
@@ -159,7 +189,11 @@ void preparePixels() {
 void prepareFrame() {
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
-			float col = sqrt(buffer[XY(x, y)])/dampenFrame;
+			float val = 0;
+			for (int i = 0; i < buffers.size(); i++) {
+				val += buffers[i][XY(x, y)];
+			}
+			float col = sqrt(val)/dampenFrame;
 			float* pixel = frame[XY(x, y)];
 			pixel[0] = col; pixel[1] = col; pixel[2] = col;
 		}
@@ -199,8 +233,10 @@ void handleEvents() {
 
 void clearData() {
 	memset(frame, 0, width*height*3*sizeof(float));
-	memset(buffer, 0, width*height*sizeof(double));
 	memset(pixels, 0, width*height*sizeof(Uint32));
+	for (int i = 0; i < buffers.size(); i++) {
+		memset(buffers[i], 0, width*height*sizeof(float));
+	}
 }
 
 void quit(int rc) {
